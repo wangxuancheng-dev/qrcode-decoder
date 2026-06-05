@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,8 +27,11 @@ import (
 	"github.com/makiuchi-d/gozxing/qrcode"
 )
 
+const maxImageSize = 10 << 20 // 10MB
+
 type Request struct {
 	Base64 string `json:"base64" form:"base64"`
+	URL    string `json:"url" form:"url"`
 }
 
 type Response struct {
@@ -59,53 +65,108 @@ func decodeHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		req.Base64 = r.PostForm.Get("base64")
+		req.URL = r.PostForm.Get("url")
 	}
 
-	b64Raw := strings.TrimSpace(req.Base64)
-	if b64Raw == "" {
-		json.NewEncoder(w).Encode(Response{Code: 1, Message: "base64不能为空"})
+	img, err := loadImage(r.Context(), strings.TrimSpace(req.URL), strings.TrimSpace(req.Base64))
+	if err != nil {
+		json.NewEncoder(w).Encode(Response{Code: 1, Message: err.Error()})
 		return
 	}
 
-	// 剔除 data:image 前缀
-	b64data := b64Raw
-	if idx := strings.Index(b64data, ","); idx != -1 {
-		b64data = b64data[idx+1:]
-	}
-
-	// Base64解码
-	imgBytes, err := base64.StdEncoding.DecodeString(b64data)
+	content, err := decodeQRCode(img)
 	if err != nil {
-		json.NewEncoder(w).Encode(Response{Code: 1, Message: "base64解码失败"})
-		return
-	}
-
-	// 图片解码
-	img, _, err := image.Decode(bytes.NewReader(imgBytes))
-	if err != nil {
-		json.NewEncoder(w).Encode(Response{Code: 1, Message: "图片格式不支持"})
-		return
-	}
-
-	// 二维码识别
-	bmp, err := gozxing.NewBinaryBitmapFromImage(img)
-	if err != nil {
-		json.NewEncoder(w).Encode(Response{Code: 1, Message: "图片处理失败"})
-		return
-	}
-
-	reader := qrcode.NewQRCodeReader()
-	result, err := reader.Decode(bmp, nil)
-	if err != nil {
-		json.NewEncoder(w).Encode(Response{Code: 1, Message: "二维码识别失败"})
+		json.NewEncoder(w).Encode(Response{Code: 1, Message: err.Error()})
 		return
 	}
 
 	json.NewEncoder(w).Encode(Response{
 		Code:    0,
 		Message: "success",
-		Content: result.GetText(),
+		Content: content,
 	})
+}
+
+func loadImage(ctx context.Context, imageURL, b64Raw string) (image.Image, error) {
+	if imageURL != "" {
+		return loadImageFromURL(ctx, imageURL)
+	}
+	if b64Raw != "" {
+		return loadImageFromBase64(b64Raw)
+	}
+	return nil, fmt.Errorf("base64或url不能为空")
+}
+
+func loadImageFromBase64(b64Raw string) (image.Image, error) {
+	b64data := b64Raw
+	if idx := strings.Index(b64data, ","); idx != -1 {
+		b64data = b64data[idx+1:]
+	}
+
+	imgBytes, err := base64.StdEncoding.DecodeString(b64data)
+	if err != nil {
+		return nil, fmt.Errorf("base64解码失败")
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(imgBytes))
+	if err != nil {
+		return nil, fmt.Errorf("图片格式不支持")
+	}
+	return img, nil
+}
+
+func loadImageFromURL(ctx context.Context, rawURL string) (image.Image, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("图片地址无效")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("图片地址仅支持http或https")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("图片地址无效")
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("图片下载失败")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("图片下载失败")
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImageSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("图片下载失败")
+	}
+	if len(body) > maxImageSize {
+		return nil, fmt.Errorf("图片过大")
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("图片格式不支持")
+	}
+	return img, nil
+}
+
+func decodeQRCode(img image.Image) (string, error) {
+	bmp, err := gozxing.NewBinaryBitmapFromImage(img)
+	if err != nil {
+		return "", fmt.Errorf("图片处理失败")
+	}
+
+	reader := qrcode.NewQRCodeReader()
+	result, err := reader.Decode(bmp, nil)
+	if err != nil {
+		return "", fmt.Errorf("二维码识别失败")
+	}
+	return result.GetText(), nil
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
