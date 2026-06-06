@@ -166,16 +166,17 @@ func decodeQRCode(img image.Image) (string, error) {
 		gozxing.DecodeHintType_TRY_HARDER:   true,
 	}
 
+	// 截图场景为主：优先纯条码模式，标准定位作拍照图兜底
 	attempts := []struct {
 		img   image.Image
 		hints map[gozxing.DecodeHintType]interface{}
 		binar func(gozxing.LuminanceSource) gozxing.Binarizer
 	}{
-		{img, tryHarder, gozxing.NewHybridBinarizer},
 		{img, pureBarcode, gozxing.NewHybridBinarizer},
 		{img, pureBarcode, gozxing.NewGlobalHistgramBinarizer},
 		{scaleImageNearest(img, 3), pureBarcode, gozxing.NewHybridBinarizer},
 		{scaleImageNearest(img, 4), pureBarcode, gozxing.NewHybridBinarizer},
+		{img, tryHarder, gozxing.NewHybridBinarizer},
 	}
 
 	reader := qrcode.NewQRCodeReader()
