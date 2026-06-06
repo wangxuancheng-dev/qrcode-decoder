@@ -129,6 +129,8 @@ func loadImageFromURL(ctx context.Context, rawURL string) (image.Image, error) {
 		return nil, fmt.Errorf("图片地址无效")
 	}
 
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; qrcode-decoder/1.0)")
+
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -156,17 +158,58 @@ func loadImageFromURL(ctx context.Context, rawURL string) (image.Image, error) {
 }
 
 func decodeQRCode(img image.Image) (string, error) {
-	bmp, err := gozxing.NewBinaryBitmapFromImage(img)
-	if err != nil {
-		return "", fmt.Errorf("图片处理失败")
+	tryHarder := map[gozxing.DecodeHintType]interface{}{
+		gozxing.DecodeHintType_TRY_HARDER: true,
+	}
+	pureBarcode := map[gozxing.DecodeHintType]interface{}{
+		gozxing.DecodeHintType_PURE_BARCODE: true,
+		gozxing.DecodeHintType_TRY_HARDER:   true,
+	}
+
+	attempts := []struct {
+		img   image.Image
+		hints map[gozxing.DecodeHintType]interface{}
+		binar func(gozxing.LuminanceSource) gozxing.Binarizer
+	}{
+		{img, tryHarder, gozxing.NewHybridBinarizer},
+		{img, pureBarcode, gozxing.NewHybridBinarizer},
+		{img, pureBarcode, gozxing.NewGlobalHistgramBinarizer},
+		{scaleImageNearest(img, 3), pureBarcode, gozxing.NewHybridBinarizer},
+		{scaleImageNearest(img, 4), pureBarcode, gozxing.NewHybridBinarizer},
 	}
 
 	reader := qrcode.NewQRCodeReader()
-	result, err := reader.Decode(bmp, nil)
-	if err != nil {
-		return "", fmt.Errorf("二维码识别失败")
+	for _, attempt := range attempts {
+		bmp, err := newBinaryBitmap(attempt.img, attempt.binar)
+		if err != nil {
+			continue
+		}
+		result, err := reader.Decode(bmp, attempt.hints)
+		if err == nil && result.GetText() != "" {
+			return result.GetText(), nil
+		}
 	}
-	return result.GetText(), nil
+	return "", fmt.Errorf("二维码识别失败")
+}
+
+func newBinaryBitmap(img image.Image, binar func(gozxing.LuminanceSource) gozxing.Binarizer) (*gozxing.BinaryBitmap, error) {
+	src := gozxing.NewLuminanceSourceFromImage(img)
+	return gozxing.NewBinaryBitmap(binar(src))
+}
+
+func scaleImageNearest(img image.Image, scale int) image.Image {
+	if scale <= 1 {
+		return img
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx()*scale, bounds.Dy()*scale
+	scaled := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			scaled.Set(x, y, img.At(bounds.Min.X+x/scale, bounds.Min.Y+y/scale))
+		}
+	}
+	return scaled
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {

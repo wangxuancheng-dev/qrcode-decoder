@@ -316,6 +316,7 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable qrcode-decoder
 sudo systemctl start qrcode-decoder
+sudo systemctl restart qrcode-decoder
 sudo systemctl status qrcode-decoder
 ```
 
